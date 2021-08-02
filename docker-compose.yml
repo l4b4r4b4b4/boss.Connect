@@ -1,0 +1,190 @@
+version: '3.7'
+
+networks:
+  web:
+    driver: bridge
+    name: web
+    attachable: true
+  inbound:
+    driver: bridge
+    name: inbound
+
+volumes:
+    prometheus_data: {}
+    grafana_data: {}
+
+services:
+  watchtower:
+    command: --label-enable --cleanup --interval 300
+    image: containrrr/watchtower
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+    network_mode: none
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  dockerproxy:
+    depends_on:
+      - watchtower
+    environment:
+      CONTAINERS: 1
+    image: tecnativa/docker-socket-proxy
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+    networks:
+      - inbound
+    ports:
+      - 2375
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+
+  traefik:
+    # The latest official supported Traefik docker image
+    image: traefik:v2.4
+    depends_on:
+      - dockerproxy
+      - watchtower
+    networks:
+      - web
+      - inbound
+    # Enables the Traefik Dashboard and tells Traefik to listen to docker
+    # enable --log.level=INFO so we can see what Traefik is doing in the log files
+    ports:
+      # Exposes port 80 for incomming web requests
+      - "80:80"
+      - "443:443"
+      # The Web UI port http://0.0.0.0:8080 (enabled by --api.insecure=true)
+      - "8080:8080"
+    volumes:
+      # So that Traefik can listen to the Docker events, if commented docker api is exposed through a proxy (see above)
+      - /var/run/docker.sock:/var/run/docker.sock
+       # Mounts the Traefik static configuration inside the Traefik container
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml
+      - ./traefik/tmp:/tmp
+      - ./letsencrypt:/letsencrypt
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck"]
+      interval: 10s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
+#    env_file: .env
+#    deploy:
+    restart: always
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+      - "traefik.enable=true"
+      - "traefik.http.routers.dashboard.rule=Host(`proxy-0.iem-experten.de`) && (PathPrefix(`/api`) || PathPrefix(`/dashboard`))"
+      - "traefik.http.routers.dashboard.service=api@internal"
+      - "traefik.http.routers.dashboard.entrypoints=websecure"
+      - "traefik.http.routers.dashboard.tls=true"
+      - "traefik.http.routers.dashboard.tls.certresolver=myresolver"
+      - "traefik.http.routers.dashboard.middlewares=auth"
+      - "traefik.http.middlewares.auth.basicauth.users=yoda:$$apr1$$6CXU2X4x$$qo.fZZDvtxOW/ZMtUo/jM/,neo:$$apr1$$S7sKCN1a$$drJb0vdTtwQROhtNBboxR."
+      - "traefik.http.services.dashboard.loadbalancer.server.port=8080"
+  prometheus:
+    image: prom/prometheus:v2.22.1
+    networks:
+      - web
+    volumes:
+      - ./prometheus/:/etc/prometheus/
+      - prometheus_data:/prometheus
+#    env_file: .env
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+#    deploy:
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+      - "traefik.enable=true"
+      - "traefik.http.routers.prometheus.rule=Host(`alert.iem-experten.de`)"
+      - "traefik.http.routers.prometheus.service=prometheus"
+      - "traefik.http.routers.prometheus.entrypoints=websecure"
+      - "traefik.http.routers.prometheus.tls=true"
+      - "traefik.http.routers.prometheus.tls.certresolver=myresolver"
+      - "traefik.http.services.prometheus.loadbalancer.server.port=9090"
+      - "traefik.docker.network=web"
+    restart: always
+  #    placement:
+   #     constraints:
+    #    - node.role==manager
+#      restart_policy:
+ #       condition: on-failure
+  
+  grafana:
+    image: grafana/grafana:7.3.1
+    networks:
+      - inbound
+      - web
+    depends_on:
+      - prometheus
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning/:/etc/grafana/provisioning/
+    env_file:
+      - ./grafana/config.monitoring
+    user: "104"
+#    deploy:
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+      - "traefik.enable=true"
+      - "traefik.http.routers.grafana.rule=Host(`monitor.iem-experten.de`)"
+      - "traefik.http.routers.grafana.service=grafana"
+      - "traefik.http.routers.grafana.entrypoints=websecure"
+      - "traefik.http.routers.grafana.tls=true"
+      - "traefik.http.routers.grafana.tls.certresolver=myresolver"
+      - "traefik.http.services.grafana.loadbalancer.server.port=3000"
+      - "traefik.docker.network=web"
+    restart: always
+#    restart: on-failure
+#      placement:
+ #       constraints:
+  #        - node.role == manager
+   #   restart_policy:
+    #    condition: on-failure
+
+# Add the catapp service
+#  catapp:
+ #    image: mikesir87/cats:1.0
+  #   env_file: .env
+   #  networks:
+    #   - web
+#     deploy:
+#     restart: always
+ #    labels:
+  #     - "com.centurylinklabs.watchtower.enable=true"
+   #    - "traefik.enable=true"
+    #   - "traefik.http.routers.catapp.rule=Host(`cats.digital-preppers.com`)"
+     #  - "traefik.http.routers.catapp.service=catapp"
+      # - "traefik.http.routers.catapp.entrypoints=websecure"
+#       - "traefik.http.routers.catapp.tls=true"
+ #      - "traefik.http.routers.catapp.tls.certresolver=myresolver"
+  #     - "traefik.http.routers.catapp.middlewares=test-compress,test-errorpages"
+   #    - "traefik.http.services.catapp.loadbalancer.server.port=5000"
+    #   - "traefik.http.middlewares.test-compress.compress=true"
+     #  - "traefik.http.middlewares.test-errorpages.errors.status=400-599"
+      # - "traefik.http.middlewares.test-errorpages.errors.service=error"
+       #- "traefik.http.middlewares.test-errorpages.errors.query=/{status}.html"
+#       - "traefik.docker.network=web"
+
+# Error Page service
+#  error:
+ #   image: guillaumebriday/traefik-custom-error-pages
+  #  networks:
+   #   - web
+    #restart: always
+ #  deploy:
+#    labels:
+ #     - "com.centurylinklabs.watchtower.enable=true"
+  #    - "traefik.enable=true"
+   #   - "traefik.http.routers.error.rule=Host(`error.digital-preppers.com`)"
+    #  - "traefik.http.routers.error.service=error"
+     # - "traefik.http.routers.error.entrypoints=websecure"
+      #- "traefik.http.routers.error.tls=true"
+#      - "traefik.http.routers.error.tls.certresolver=myresolver"
+ #     - "traefik.http.services.error.loadbalancer.server.port=80"
+  #    - "traefik.docker.network=web"
+#
